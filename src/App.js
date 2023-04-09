@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useTransition } from "react";
 import "./App.css";
 import { Auth } from "./components/auth";
 import { db, auth, storage } from "./config/firebase";
@@ -9,10 +9,21 @@ import {
   deleteDoc,
   updateDoc,
   doc,
+  query,
+  where,
 } from "firebase/firestore";
-import { ref, uploadBytes, listAll, getDownloadURL } from "firebase/storage";
+import {
+  ref,
+  uploadBytes,
+  listAll,
+  getDownloadURL,
+  deleteObject,
+} from "firebase/storage";
+import { onAuthStateChanged } from "firebase/auth";
 
 function App() {
+  const [isPending, startTransition] = useTransition();
+  const [currentUser, setCurrentUser] = useState(null);
   const [movieList, setMovieList] = useState([]);
 
   // New Movie States
@@ -28,37 +39,70 @@ function App() {
 
   //file Read State
 
-  const [imageUrls, setImageUrls] = useState([]);
-
   const moviesCollectionRef = collection(db, "movies");
 
   const getMovieList = async () => {
     try {
-      const data = await getDocs(moviesCollectionRef);
+      // const data = await getDocs(moviesCollectionRef);
+      const data = await getDocs(
+        query(moviesCollectionRef, where("userId", "==", currentUser.uid))
+      );
       const filteredData = data.docs.map((doc) => ({
         ...doc.data(),
         id: doc.id,
       }));
-      setMovieList(filteredData);
+      setImagesToMovie(filteredData);
     } catch (err) {
       console.error(err);
     }
   };
-  const getPhotosList = async () => {
-    setImageUrls([])
-    const imagesListRef = ref(storage, "projectFiles/");
-    listAll(imagesListRef).then((response) => {
-      response.items.forEach((item) => {
-        getDownloadURL(item).then((url) => {
-          setImageUrls((prev) => [...prev, url]);
-        });
-      });
-    });
+
+  const setImagesToMovie = async (movies) => {
+    setMovieList([]);
+    const newMovies = await Promise.all(
+      movies.map(async (movie) => {
+        const images = await getPhotosList(movie.id);
+        return {
+          ...movie,
+          images: images,
+        };
+      })
+    );
+    setMovieList(newMovies);
   };
+
+  const getPhotosList = async (id) => {
+    const imagesListRef = ref(storage, `${id}/`);
+    const images = await listAll(imagesListRef);
+    const urls = await Promise.all(
+      images.items.reverse().map(async (item) => {
+        const url = await getDownloadURL(item);
+        return url;
+      })
+    );
+    return urls;
+  };
+
   useEffect(() => {
-    getMovieList();
-    getPhotosList();
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      if (user) {
+        setCurrentUser(user);
+      } else {
+        setCurrentUser(null);
+      }
+    });
+
+    return () => unsubscribe();
   }, []);
+
+  useEffect(() => {
+    if (currentUser) {
+      getMovieList();
+    }else{
+      setMovieList([]);
+    }
+    
+  }, [currentUser]);
 
   const onSubmitMovie = async () => {
     try {
@@ -76,20 +120,38 @@ function App() {
 
   const deleteMovie = async (id) => {
     const movieDoc = doc(db, "movies", id);
-    await deleteDoc(movieDoc);
+    const folderRef = ref(storage, `${id}/`);
+
+    try {
+      const folderItems = await listAll(folderRef);
+      await Promise.all(
+        folderItems.items.map(async (itemRef) => {
+          await deleteObject(itemRef);
+        })
+      );
+
+      await deleteDoc(movieDoc);
+    } catch (error) {
+      console.log(error);
+    }
+    getMovieList();
   };
 
   const updateMovieTitle = async (id) => {
     const movieDoc = doc(db, "movies", id);
     await updateDoc(movieDoc, { title: updatedTitle });
+    startTransition(() => {
+      getMovieList();
+    });
+    // getMovieList();
   };
 
-  const uploadFile = async () => {
+  const uploadFile = async (id) => {
     if (!fileUpload) return;
-    const filesFolderRef = ref(storage, `projectFiles/${fileUpload.name}`);
+    const filesFolderRef = ref(storage, `${id}/${fileUpload.name}`);
     try {
       await uploadBytes(filesFolderRef, fileUpload);
-      getPhotosList();
+      getMovieList();
     } catch (err) {
       console.error(err);
     }
@@ -99,7 +161,6 @@ function App() {
     <div className="App">
       <Auth />
       <hr></hr>
-
       <div>
         <input
           placeholder="Movie title..."
@@ -116,15 +177,21 @@ function App() {
           onChange={(e) => setIsNewMovieOscar(e.target.checked)}
         />
         <label> Received an Oscar</label>
+
         <button onClick={onSubmitMovie}> Submit Movie</button>
       </div>
       <hr></hr>
       <div>
-        {movieList.map((movie) => (
-          <div>
+        {movieList.map((movie, i) => (
+          <div key={i}>
             <h1 style={{ color: movie.receivedAnOscar ? "green" : "red" }}>
               {movie.title}
             </h1>
+            <img
+              style={{ width: "300px", height: "400px" }}
+              src={movie.images[0]}
+            ></img>
+
             <p> Date: {movie.releaseDate} </p>
 
             <button onClick={() => deleteMovie(movie.id)}> Delete Movie</button>
@@ -137,19 +204,25 @@ function App() {
               {" "}
               Update Title
             </button>
+            <div>
+              <input
+                type="file"
+                onChange={(e) => setFileUpload(e.target.files[0])}
+              />
+              <button onClick={(e) => uploadFile(movie.id)}>
+                {" "}
+                Upload File{" "}
+              </button>
+            </div>
           </div>
         ))}
       </div>
       <hr></hr>
 
-      <div>
-        <input type="file" onChange={(e) => setFileUpload(e.target.files[0])} />
-        <button onClick={uploadFile}> Upload File </button>
-      </div>
       <hr></hr>
-      {imageUrls.map((url) => {
+      {/* {imageUrls.map((url) => {
         return <img src={url} style={{ width: "400px" }} />;
-      })}
+      })} */}
     </div>
   );
 }
